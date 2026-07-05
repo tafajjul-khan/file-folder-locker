@@ -9,15 +9,17 @@ from send2trash import send2trash # For Recycle bin
 class SecureVaultApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("File Folder Lock  (v3.0)")
+        self.root.title("File Folder Lock (v3.1)")
         self.root.geometry("500x700")
 
-        self.vault_path = os.path.join(os.getcwd(), ".my_private_vault")
+        self.vault_path = os.path.abspath(os.path.join(os.getcwd(), ".my_private_vault"))
         self.db_path = os.path.join(self.vault_path, "vault_registry.json")
 
         if not os.path.exists(self.vault_path):
             os.makedirs(self.vault_path)
-            os.system(f"attrib +h {self.vault_path}")
+            # Windows hidden attribute (works safely on Windows)
+            if os.name == 'nt':
+                os.system(f"attrib +h \"{self.vault_path}\"")
 
         self.setup_ui()
         self.refresh_vault_list()
@@ -84,7 +86,7 @@ class SecureVaultApp:
         path = filedialog.askdirectory() if is_folder else filedialog.askopenfilename()
         if path:
             self.path_entry.delete(0, tk.END)
-            self.path_entry.insert(0, path)
+            self.path_entry.insert(0, os.path.abspath(path))
 
     def hash_password(self, password):
         return hashlib.sha256(password.encode()).hexdigest()
@@ -106,29 +108,61 @@ class SecureVaultApp:
         if not source or not os.path.exists(source):
             messagebox.showerror("Error", "Select a valid path!")
             return
+
+        # Paths ko normalize aur absolute banaya validation ke liye
+        source_abs = os.path.abspath(source)
+        current_dir = os.path.abspath(os.getcwd())
+
+        # --- EDGE CASE PROTECTION ---
+        # 1. Khud ke project folder ya uski kisi file ko lock karne se rokna
+        if source_abs == current_dir or source_abs.startswith(current_dir + os.sep):
+            messagebox.showerror("Security Warning", "You cannot lock this project's folder or any file inside it!\nThis is required to keep the application running.")
+            return
+
+        # 2. Vault folder ko hi lock karne se rokna
+        if source_abs == self.vault_path:
+            messagebox.showerror("Error", "Cannot lock the Vault storage directory itself!")
+            return
+
+        # 3. System Critical folders block karna (Windows safety)
+        system_critical = [
+            os.path.abspath(os.environ.get("SystemRoot", "C:\\Windows")),
+            os.path.abspath(os.environ.get("ProgramFiles", "C:\\Program Files")),
+            os.path.abspath("C:\\")
+        ]
+        if source_abs in system_critical:
+            messagebox.showerror("Danger", "Locking system critical directories is restricted for OS safety!")
+            return
+        # -----------------------------
+
         if not p1 or p1 != p2:
             messagebox.showerror("Error", "Passwords do not match!")
             return
 
         try:
-            filename = os.path.basename(source)
+            filename = os.path.basename(source_abs)
             dest = os.path.join(self.vault_path, filename)
             
+            # Agar file already vault me hai to collision avoid karein
             data = {}
             if os.path.exists(self.db_path):
                 with open(self.db_path, "r") as f:
                     data = json.load(f)
             
+            if filename in data:
+                messagebox.showerror("Error", "A file/folder with this name is already locked in the vault!")
+                return
+
             data[filename] = {
-                "original_path": source,
+                "original_path": source_abs,
                 "password": self.hash_password(p1),
-                "attempts": 0  # Initial attempts 0
+                "attempts": 0
             }
 
             with open(self.db_path, "w") as f:
                 json.dump(data, f)
 
-            shutil.move(source, dest)
+            shutil.move(source_abs, dest)
             messagebox.showinfo("Success", f"{filename} locked!\nMax attempts: 20")
             
             self.path_entry.delete(0, tk.END)
@@ -137,7 +171,7 @@ class SecureVaultApp:
             self.refresh_vault_list()
 
         except Exception as e:
-            messagebox.showerror("Error", str(e))
+            messagebox.showerror("Error", f"Failed to move/lock file: {str(e)}")
 
     def unlock_logic(self):
         selected_index = self.vault_list.curselection()
@@ -155,7 +189,6 @@ class SecureVaultApp:
         hashed_input = self.hash_password(input_pass)
 
         if file_data and hashed_input == file_data['password']:
-            # Success logic
             try:
                 orig_path = file_data['original_path']
                 vault_file = os.path.join(self.vault_path, filename)
@@ -175,14 +208,12 @@ class SecureVaultApp:
             except Exception as e:
                 messagebox.showerror("Error", str(e))
         else:
-            # Wrong Password - Attempt Logic
             file_data['attempts'] += 1
             remaining = 20 - file_data['attempts']
             
             if file_data['attempts'] >= 20:
-                # Self-destruct logic (Move to Recycle Bin)
                 vault_file = os.path.join(self.vault_path, filename)
-                send2trash(vault_file) # Sends to Recycle Bin
+                send2trash(vault_file)
                 
                 del data[filename]
                 with open(self.db_path, "w") as f:
